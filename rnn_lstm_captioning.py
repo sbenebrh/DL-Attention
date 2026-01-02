@@ -350,7 +350,7 @@ class WordEmbedding(nn.Module):
         # TODO: Implement the forward pass for word embeddings.
         ######################################################################
         # Replace "pass" statement with your code
-        pass
+        out = self.W_embed[x]
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -395,7 +395,7 @@ def temporal_softmax_loss(x, y, ignore_index=None):
     # all timesteps and *averaging* across the minibatch.
     ##########################################################################
     # Replace "pass" statement with your code
-    pass
+    loss = F.cross_entropy(x.reshape(-1, x.shape[-1]), y.reshape(-1), ignore_index=ignore_index, reduction="sum") / x.shape[0]
     ##########################################################################
     #                             END OF YOUR CODE                           #
     ##########################################################################
@@ -466,7 +466,24 @@ class CaptioningRNN(nn.Module):
         # (2) feature projection (from CNN pooled feature to h0)
         ######################################################################
         # Replace "pass" statement with your code
-        pass
+        # Core modules
+        self.image_encoder = ImageEncoder(pretrained=image_encoder_pretrained, verbose=False)
+        self.word_embedding = WordEmbedding(vocab_size, wordvec_dim)
+
+        # Project pooled CNN features (N, C) -> initial hidden state h0 (N, H)
+        self.feat_proj = nn.Linear(input_dim, hidden_dim)
+
+        # Recurrent core (for now only rnn is required, but this won’t break later)
+        if self.cell_type == "rnn":
+            self.rnn = RNN(wordvec_dim, hidden_dim)
+        elif self.cell_type == "lstm":
+            self.rnn = LSTM(wordvec_dim, hidden_dim)
+        else:  # "attn"
+            self.rnn = AttentionLSTM(wordvec_dim, hidden_dim)
+            self.attn_proj = nn.Linear(input_dim, hidden_dim)
+
+        # Hidden -> vocab scores
+        self.output_proj = nn.Linear(hidden_dim, vocab_size)
         ######################################################################
         #                            END OF YOUR CODE                        #
         ######################################################################
@@ -517,7 +534,31 @@ class CaptioningRNN(nn.Module):
         # Do not worry about regularizing the weights or their gradients!
         ######################################################################
         # Replace "pass" statement with your code
-        pass
+        # (1) Encode image and compute initial state
+        feats = self.image_encoder(images)  # (N, C, 4, 4)
+
+        if self.cell_type == "attn":
+            # Project spatial features channel-wise to hidden_dim: (N, C, 4, 4) -> (N, H, 4, 4)
+            A = self.attn_proj(feats.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+            h0 = A.mean(dim=(2, 3))
+        else:
+            pooled = feats.mean(dim=(2, 3))  # (N, C)
+            h0 = self.feat_proj(pooled)  # (N, H)
+
+        # (2) Embed input captions
+        x_embed = self.word_embedding(captions_in)  # (N, T, W)
+
+        # (3) Run the recurrent module
+        if self.cell_type in ("rnn", "lstm"):
+            h = self.rnn(x_embed, h0)  # (N, T, H)
+        else:
+            h = self.rnn(x_embed, A)  # (N, T, H)
+
+        # (4) Compute vocab scores at each timestep
+        scores = self.output_proj(h)  # (N, T, V)
+
+        # (5) Loss
+        loss = temporal_softmax_loss(scores, captions_out, self.ignore_index)
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -640,7 +681,21 @@ class LSTM(nn.Module):
         ######################################################################
         next_h, next_c = None, None
         # Replace "pass" statement with your code
-        pass
+        a = x @ self.Wx + prev_h @ self.Wh + self.b  # (N, 4H)
+
+        H = prev_h.shape[1]
+        a_i = a[:, 0:H]
+        a_f = a[:, H:2 * H]
+        a_o = a[:, 2 * H:3 * H]
+        a_g = a[:, 3 * H:4 * H]
+
+        i = torch.sigmoid(a_i)
+        f = torch.sigmoid(a_f)
+        o = torch.sigmoid(a_o)
+        g = torch.tanh(a_g)
+
+        next_c = f * prev_c + i * g
+        next_h = o * torch.tanh(next_c)
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -674,7 +729,19 @@ class LSTM(nn.Module):
         ######################################################################
         hn = None
         # Replace "pass" statement with your code
-        pass
+        N, T, D = x.shape
+        H = h0.shape[1]
+
+        hn = x.new_zeros((N, T, H))
+
+        prev_h = h0
+        prev_c = c0
+
+        for t in range(T):
+            xt = x[:, t, :]  # (N, D)
+            next_h, next_c = self.step_forward(xt, prev_h, prev_c)
+            hn[:, t, :] = next_h
+            prev_h, prev_c = next_h, next_c
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -705,7 +772,20 @@ def dot_product_attention(prev_h, A):
     # functions. HINT: Make sure you reshape attn_weights back to (N, 4, 4)! #
     ##########################################################################
     # Replace "pass" statement with your code
-    pass
+    # Flatten spatial dims: (N, H, 4, 4) -> (N, H, 16)
+    A_flat = A.reshape(N, H, D_a * D_a)
+
+    # Scaled dot-product scores: (N, 16)
+    scores = (prev_h.unsqueeze(2) * A_flat).sum(dim=1) / math.sqrt(H)
+
+    # Attention weights over spatial locations
+    weights_flat = F.softmax(scores, dim=1)  # (N, 16)
+
+    # Weighted sum to produce attention embedding: (N, H)
+    attn = (A_flat * weights_flat.unsqueeze(1)).sum(dim=2)
+
+    # Reshape weights back to (N, 4, 4)
+    attn_weights = weights_flat.reshape(N, D_a, D_a)
     ##########################################################################
     #                             END OF YOUR CODE                           #
     ##########################################################################
@@ -769,7 +849,21 @@ class AttentionLSTM(nn.Module):
         #######################################################################
         next_h, next_c = None, None
         # Replace "pass" statement with your code
-        pass
+        a = x @ self.Wx + prev_h @ self.Wh + attn @ self.Wattn + self.b  # (N, 4H)
+
+        H = prev_h.shape[1]
+        a_i = a[:, 0:H]
+        a_f = a[:, H:2 * H]
+        a_o = a[:, 2 * H:3 * H]
+        a_g = a[:, 3 * H:4 * H]
+
+        i = torch.sigmoid(a_i)
+        f = torch.sigmoid(a_f)
+        o = torch.sigmoid(a_o)
+        g = torch.tanh(a_g)
+
+        next_c = f * prev_c + i * g
+        next_h = o * torch.tanh(next_c)
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
@@ -812,7 +906,20 @@ class AttentionLSTM(nn.Module):
         ######################################################################
         hn = None
         # Replace "pass" statement with your code
-        pass
+        N, T, D = x.shape
+        H = h0.shape[1]
+
+        hn = x.new_zeros((N, T, H))
+
+        prev_h = h0
+        prev_c = c0
+
+        for t in range(T):
+            xt = x[:, t, :]
+            attn, _ = dot_product_attention(prev_h, A)
+            next_h, next_c = self.step_forward(xt, prev_h, prev_c, attn)
+            hn[:, t, :] = next_h
+            prev_h, prev_c = next_h, next_c
         ######################################################################
         #                           END OF YOUR CODE                         #
         ######################################################################
