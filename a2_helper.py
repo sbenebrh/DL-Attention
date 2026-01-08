@@ -247,7 +247,8 @@ def val(model, dataloader, loss_func, batch_size, device=torch.device("cpu")):
 
 def inference(model, inp_exp, inp_exp_pos, out_pos_exp, out_seq_len):
     model.eval()
-    y_init = torch.LongTensor([14]).unsqueeze(0).cuda().view(1, 1)
+    device = next(model.parameters()).device  # or inp_exp.device
+    y_init = torch.tensor([[14]], dtype=torch.long, device=device)  # shape (1, 1)
 
     ques_emb = model.emb_layer(inp_exp)
     q_emb_inp = ques_emb + inp_exp_pos
