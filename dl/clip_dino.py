@@ -25,7 +25,11 @@ def get_similarity_no_loop(text_features, image_features):
     ############################################################################
     # TODO: Compute the cosine similarity. Do NOT use for loops.               #
     ############################################################################
-
+     # Normalize features
+    text_norm = torch.nn.functional.normalize(text_features, dim=1)   # (N, D)
+    image_norm = torch.nn.functional.normalize(image_features, dim=1) # (M, D)
+    # Compute cosine similarity
+    similarity = text_norm @ image_norm.T  # (N, M)
     ############################################################################
     #                             END OF YOUR CODE                             #
     ############################################################################
@@ -61,7 +65,18 @@ def clip_zero_shot_classifier(clip_model, clip_preprocess, images,
     ############################################################################
     # TODO: Find the class labels for images.                                  #
     ############################################################################
+    # Preprocess and encode images
+    image_tensors = torch.stack([clip_preprocess(Image.fromarray(img)).to(device) for img in images])
+    image_features = clip_model.encode_image(image_tensors)
 
+    # Tokenize and encode class texts
+    text_tokens = clip.tokenize(class_texts).to(device)
+    text_features = clip_model.encode_text(text_tokens)
+
+    # Compute similarity between image features and text features
+    similarity = get_similarity_no_loop(text_features, image_features)
+    top_indices = similarity.argmax(dim=0)
+    pred_classes = [class_texts[idx] for idx in top_indices]
     ############################################################################
     #                             END OF YOUR CODE                             #
     ############################################################################
@@ -89,7 +104,11 @@ class CLIPImageRetriever:
         # computation for each text query. You may end up NOT using the above      #
         # similarity function for most compute-optimal implementation.#
         ############################################################################
-
+        self.clip_model = clip_model
+        self.clip_preprocess = clip_preprocess
+        self.device = device
+        image_tensors = torch.stack([clip_preprocess(Image.fromarray(img)).to(device) for img in images])
+        self.image_features = torch.nn.functional.normalize(clip_model.encode_image(image_tensors), dim=1)
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
@@ -112,7 +131,12 @@ class CLIPImageRetriever:
         ############################################################################
         # TODO: Retrieve the indices of top-k images.                              #
         ############################################################################
-
+        text_tokens = clip.tokenize([query]).to(self.device)
+        text_features = self.clip_model.encode_text(text_tokens)
+        text_features = torch.nn.functional.normalize(text_features, dim=1)
+        # Compute similarity
+        similarity = text_features @ self.image_features.T
+        top_indices = similarity.topk(k=k, dim=1).indices[0].tolist()
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
@@ -229,7 +253,13 @@ class DINOSegmentation:
         # function to train classify each DINO feature vector into a seg. class.   #
         # It can be a linear layer or two layer neural network.                    #
         ############################################################################
-
+        self.model = nn.Sequential(
+            nn.Linear(inp_dim, 256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, num_classes),
+        ).to(device)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-3, weight_decay=1e-5)
+        self.loss_fn = nn.CrossEntropyLoss()
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
@@ -246,7 +276,13 @@ class DINOSegmentation:
         ############################################################################
         # TODO: Train your model for `num_iters` steps.                            #
         ############################################################################
-
+        self.model.train()
+        for it in range(num_iters):
+            logits = self.model(X_train)
+            loss = self.loss_fn(logits, Y_train)
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
@@ -266,7 +302,9 @@ class DINOSegmentation:
         ############################################################################
         # TODO: Train your model for `num_iters` steps.                            #
         ############################################################################
-
+        self.model.eval()
+        logits = self.model(X_test)
+        pred_classes = logits.argmax(dim=1)
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
